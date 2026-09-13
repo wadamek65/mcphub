@@ -229,6 +229,7 @@ export class MCPHubOAuthProvider implements OAuthClientProvider {
         clientId: info.client_id,
         clientSecret: info.client_secret,
         scopes,
+        issuer: this.serverConfig.oauth?.dynamicRegistration?.issuer,
       });
 
       if (updatedConfig) {

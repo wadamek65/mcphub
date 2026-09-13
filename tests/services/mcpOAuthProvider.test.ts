@@ -24,6 +24,7 @@ jest.mock('../../src/services/mcpService.js', () => ({
 
 import { getSystemConfigDao } from '../../src/dao/index.js';
 import { MCPHubOAuthProvider, createOAuthProvider } from '../../src/services/mcpOAuthProvider.js';
+import { persistClientCredentials } from '../../src/services/oauthSettingsStore.js';
 
 describe('MCPHubOAuthProvider redirect URI resolution', () => {
   const originalEnv = process.env;
@@ -68,6 +69,35 @@ describe('MCPHubOAuthProvider redirect URI resolution', () => {
     } as any);
 
     expect(provider.redirectUrl).toBe('https://env.example.com/mcphub/oauth/callback');
+  });
+
+  it('preserves the configured issuer when the SDK saves client information', async () => {
+    (getSystemConfigDao as jest.Mock).mockReturnValue({
+      get: jest.fn().mockResolvedValue({}),
+    });
+    (persistClientCredentials as jest.Mock).mockResolvedValue({
+      oauth: {},
+    });
+
+    const provider = await MCPHubOAuthProvider.create('notion', {
+      url: 'https://mcp.notion.com/mcp',
+      oauth: {
+        dynamicRegistration: {
+          enabled: true,
+          issuer: 'https://issuer.example.com/path',
+        },
+      },
+    } as any);
+
+    await provider.saveClientInformation({ client_id: 'registered-client' } as any);
+
+    expect(persistClientCredentials).toHaveBeenCalledWith(
+      'notion',
+      expect.objectContaining({
+        clientId: 'registered-client',
+        issuer: 'https://issuer.example.com/path',
+      }),
+    );
   });
 
   it('registers the preferred redirect URI ahead of the Base URL in client metadata', async () => {
