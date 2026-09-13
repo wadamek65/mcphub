@@ -69,6 +69,7 @@ export const persistClientCredentials = async (
     authorizationEndpoint?: string;
     tokenEndpoint?: string;
     revocationEndpoint?: string;
+    issuer?: string;
   },
 ): Promise<ServerConfigWithOAuth | undefined> => {
   const updated = await mutateOAuthSettings(serverName, ({ oauth }) => {
@@ -86,6 +87,12 @@ export const persistClientCredentials = async (
     }
     if (credentials.revocationEndpoint) {
       oauth.revocationEndpoint = credentials.revocationEndpoint;
+    }
+    if (credentials.issuer) {
+      oauth.dynamicRegistration = {
+        ...oauth.dynamicRegistration,
+        issuer: credentials.issuer,
+      };
     }
   });
 

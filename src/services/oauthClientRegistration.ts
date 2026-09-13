@@ -320,15 +320,18 @@ export const registerClient = async (
 
     logger.log('Successfully registered OAuth client', { serverName });
 
-    // Extract client ID from the configuration
-    const clientId = (config as any).client_id || (config as any).clientId;
+    const registeredMetadata = config.clientMetadata();
+    const clientId = registeredMetadata.client_id;
+    if (!clientId) {
+      throw new Error('Dynamic client registration returned no client_id');
+    }
     logger.log('Registered OAuth client identifier', { serverName, clientId });
 
     // Step 4: Store registered client information
     const clientInfo: RegisteredClientInfo = {
       config,
       clientId,
-      clientSecret: (config as any).client_secret, // Access client secret if available
+      clientSecret: registeredMetadata.client_secret,
       registrationAccessToken: (config as any).registrationAccessToken,
       registrationClientUri: (config as any).registrationClientUri,
       expiresAt: (config as any).client_secret_expires_at
@@ -348,6 +351,7 @@ export const registerClient = async (
       authorizationEndpoint: clientInfo.config.serverMetadata().authorization_endpoint,
       tokenEndpoint: clientInfo.config.serverMetadata().token_endpoint,
       revocationEndpoint: clientInfo.config.serverMetadata().revocation_endpoint,
+      issuer: autoDetectedIssuer || dynamicConfig?.issuer,
     });
 
     if (persistedConfig) {

@@ -29,6 +29,7 @@ jest.mock('../../src/dao/index.js', () => ({
 }));
 
 import { getSystemConfigDao } from '../../src/dao/index.js';
+import { persistClientCredentials } from '../../src/services/oauthSettingsStore.js';
 import {
   fetchProtectedResourceMetadata,
   initializeOAuthForServer,
@@ -48,13 +49,40 @@ describe('registerClient redirect URI handling', () => {
     mockFindByUsername.mockResolvedValue(undefined);
     mockDiscovery.mockResolvedValue({});
     mockDynamicClientRegistration.mockResolvedValue({
-      client_id: 'registered-client',
-      client_secret: 'registered-secret',
+      clientMetadata: () => ({
+        client_id: 'registered-client',
+        client_secret: 'registered-secret',
+      }),
       serverMetadata: () => ({
         authorization_endpoint: 'https://issuer.example.com/authorize',
         token_endpoint: 'https://issuer.example.com/token',
       }),
     });
+  });
+
+  it('persists client metadata and the configured issuer', async () => {
+    (getSystemConfigDao as jest.Mock).mockReturnValue({
+      get: jest.fn().mockResolvedValue({}),
+    });
+
+    await registerClient('notion', {
+      url: 'https://mcp.notion.com/mcp',
+      oauth: {
+        dynamicRegistration: {
+          enabled: true,
+          issuer: 'https://issuer.example.com/path',
+        },
+      },
+    } as any);
+
+    expect(persistClientCredentials).toHaveBeenCalledWith(
+      'notion',
+      expect.objectContaining({
+        clientId: 'registered-client',
+        clientSecret: 'registered-secret',
+        issuer: 'https://issuer.example.com/path',
+      }),
+    );
   });
 
   it('uses oauth.redirectUri for dynamic client registration when provided', async () => {
