@@ -53,6 +53,22 @@ describe('oauthIssuer (RFC 9207 iss validation)', () => {
       expect(result).toEqual({ valid: true, checked: true });
     });
 
+    it('accepts a pathful issuer that contains the authorization endpoint', () => {
+      const result = validateAuthorizationIss({
+        iss: 'https://as.example.com/api/auth',
+        authorizationUrl: 'https://as.example.com/api/auth/oauth2/authorize',
+      });
+      expect(result).toEqual({ valid: true, checked: true });
+    });
+
+    it('rejects a path prefix that is not a path boundary', () => {
+      const result = validateAuthorizationIss({
+        iss: 'https://as.example.com/api/auth',
+        authorizationUrl: 'https://as.example.com/api/auth-evil/authorize',
+      });
+      expect(result.valid).toBe(false);
+    });
+
     it('accepts an iss matching the explicitly configured issuer', () => {
       const result = validateAuthorizationIss({
         iss: 'https://tenant.auth.example.com',

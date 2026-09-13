@@ -34,6 +34,29 @@ const originOf = (url: string | undefined): string | undefined => {
   }
 };
 
+const authorizationUrlBelongsToIssuer = (
+  authorizationUrl: string | undefined,
+  issuer: string,
+): boolean => {
+  if (!authorizationUrl) {
+    return false;
+  }
+  try {
+    const authorization = new URL(authorizationUrl);
+    const expectedIssuer = new URL(issuer);
+    const issuerPath = expectedIssuer.pathname.replace(/\/$/, '');
+
+    return (
+      expectedIssuer.search === '' &&
+      expectedIssuer.hash === '' &&
+      authorization.origin === expectedIssuer.origin &&
+      (authorization.pathname === issuerPath || authorization.pathname.startsWith(`${issuerPath}/`))
+    );
+  } catch {
+    return false;
+  }
+};
+
 /**
  * Expected `iss` values for an upstream authorization flow: the explicitly
  * configured issuer plus the origin of the authorization endpoint actually used.
@@ -66,7 +89,7 @@ export const validateAuthorizationIss = (
     return { valid: true, checked: false };
   }
 
-  if (expected.includes(iss)) {
+  if (expected.includes(iss) || authorizationUrlBelongsToIssuer(ctx.authorizationUrl, iss)) {
     return { valid: true, checked: true };
   }
 
