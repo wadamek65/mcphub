@@ -2000,6 +2000,7 @@ export const initializeClientsFromSettings = async (
             // Other connection errors
             active.status = 'disconnected';
             active.error = `Failed to connect: ${formatErrorForLogging(error)}`;
+            // ponytail: SSE recovery stays on its existing path until it has SSE integration coverage.
             if (
               expandedConf.enableKeepAlive !== true &&
               transport instanceof StreamableHTTPClientTransport

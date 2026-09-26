@@ -44,6 +44,7 @@ export const setupClientKeepAlive = async (
   // Default interval: 60 seconds
   const interval = serverConfig.keepAliveInterval || 60000;
   let isChecking = false;
+  let inconclusiveFailures = 0;
 
   const isHealthCheckCurrent = (activeClient: NonNullable<ServerInfo['client']>): boolean =>
     serverInfo.client === activeClient &&
@@ -106,6 +107,7 @@ export const setupClientKeepAlive = async (
         return;
       }
 
+      inconclusiveFailures = 0;
       if (serverInfo.status !== 'connected') {
         logger.log('Keep-alive ping restored server connection', {
           serverName: serverInfo.name,
@@ -119,13 +121,14 @@ export const setupClientKeepAlive = async (
       }
 
       const message = formatErrorForLogging(error);
-      // A slow or briefly unavailable HTTP endpoint does not prove the MCP session is lost.
+      // A single slow or unavailable HTTP response does not prove the session is lost.
+      const code = (error as { code?: unknown } | null)?.code;
       if (
         isStreamableHttp &&
         serverInfo.status === 'connected' &&
         (/timed out|timeout/i.test(message) ||
-          (typeof (error as { code?: unknown }).code === 'number' &&
-            (error as { code: number }).code >= 500))
+          (typeof code === 'number' && code >= 500 && code < 600)) &&
+        ++inconclusiveFailures < 3
       ) {
         logger.warn('Keep-alive ping inconclusive', { serverName: serverInfo.name, error });
         return;

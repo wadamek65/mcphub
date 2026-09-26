@@ -104,6 +104,51 @@ describe('setupClientKeepAlive', () => {
     expect(serverInfo.error).toBeNull();
   });
 
+  it('disconnects after three consecutive inconclusive probes', async () => {
+    jest.useFakeTimers();
+    const ping = jest
+      .fn()
+      .mockRejectedValue(Object.assign(new Error('502 Bad Gateway'), { code: 502 }));
+    const serverInfo = makeServerInfo(
+      new StreamableHTTPClientTransport(new URL('https://example.com/mcp')),
+      ping,
+    );
+    await setupClientKeepAlive(serverInfo, {
+      type: 'streamable-http',
+      url: 'https://example.com/mcp',
+      enableKeepAlive: true,
+    });
+
+    await jest.advanceTimersByTimeAsync(120_000);
+    expect(serverInfo.status).toBe('connected');
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(serverInfo.status).toBe('disconnected');
+    expect(serverInfo.error).toContain('502');
+  });
+
+  it('resets the inconclusive count after a successful probe', async () => {
+    jest.useFakeTimers();
+    const ping = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('Request timed out'))
+      .mockRejectedValueOnce(new Error('Request timed out'))
+      .mockResolvedValueOnce({})
+      .mockRejectedValue(new Error('Request timed out'));
+    const serverInfo = makeServerInfo(
+      new StreamableHTTPClientTransport(new URL('https://example.com/mcp')),
+      ping,
+    );
+    await setupClientKeepAlive(serverInfo, {
+      type: 'streamable-http',
+      url: 'https://example.com/mcp',
+      enableKeepAlive: true,
+    });
+
+    await jest.advanceTimersByTimeAsync(240_000);
+    expect(serverInfo.status).toBe('connected');
+    expect(serverInfo.error).toBeNull();
+  });
+
   it('does not start a second remote health check while one is still running', async () => {
     jest.useFakeTimers();
     const deferred = createDeferred<unknown>();
