@@ -63,12 +63,11 @@ describe('setupClientKeepAlive', () => {
     expect(serverInfo.error).toContain('connect ECONNREFUSED');
   });
 
-  it('includes HTTP error metadata in the displayed keep-alive error', async () => {
+  it('does not disconnect a healthy server after one HTTP 502 probe', async () => {
     jest.useFakeTimers();
-    const error = Object.assign(
-      new Error('Streamable HTTP error: Error POSTing to endpoint: '),
-      { code: 502 },
-    );
+    const error = Object.assign(new Error('Streamable HTTP error: Error POSTing to endpoint: '), {
+      code: 502,
+    });
     const ping = jest.fn().mockRejectedValue(error);
     const serverInfo = makeServerInfo(
       new StreamableHTTPClientTransport(new URL('https://example.com/mcp')),
@@ -83,8 +82,26 @@ describe('setupClientKeepAlive', () => {
 
     await jest.advanceTimersByTimeAsync(60000);
 
-    expect(serverInfo.error).toContain('Streamable HTTP error: Error POSTing to endpoint:');
-    expect(serverInfo.error).toContain('502');
+    expect(serverInfo.status).toBe('connected');
+    expect(serverInfo.error).toBeNull();
+  });
+
+  it('does not disconnect a healthy server after one ping timeout', async () => {
+    jest.useFakeTimers();
+    const ping = jest.fn().mockRejectedValue(new Error('Request timed out'));
+    const serverInfo = makeServerInfo(
+      new StreamableHTTPClientTransport(new URL('https://example.com/mcp')),
+      ping,
+    );
+    await setupClientKeepAlive(serverInfo, {
+      type: 'streamable-http',
+      url: 'https://example.com/mcp',
+      enableKeepAlive: true,
+    });
+
+    await jest.advanceTimersByTimeAsync(60000);
+    expect(serverInfo.status).toBe('connected');
+    expect(serverInfo.error).toBeNull();
   });
 
   it('does not start a second remote health check while one is still running', async () => {

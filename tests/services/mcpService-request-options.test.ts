@@ -71,6 +71,12 @@ jest.mock('../../src/services/keepAliveService.js', () => ({
   setupClientKeepAlive: jest.fn().mockResolvedValue(undefined),
 }));
 
+// Keep retry tests independent of DNS and network timing.
+jest.mock('../../src/utils/ssrf.js', () => ({
+  assertSafeUrl: jest.fn().mockResolvedValue(undefined),
+  createRedirectValidatingFetch: jest.fn((fetchImpl: any) => fetchImpl),
+}));
+
 jest.mock('../../src/services/proxy.js', () => ({
   createFetchWithProxy: jest.fn(),
   getProxyConfigFromEnv: jest.fn(() => undefined),
@@ -108,17 +114,23 @@ jest.mock('../../src/config/index.js', () => ({
 
 import {
   cleanupAllServers,
+  closeServer,
   getServerByName,
   initUpstreamServers,
   reconnectServer,
 } from '../../src/services/mcpService.js';
 import { setupClientKeepAlive } from '../../src/services/keepAliveService.js';
 
+const flushAsync = async () => {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+};
+
 const originalDefaultRequestTimeout = process.env.DEFAULT_REQUEST_TIMEOUT;
 
 describe('mcpService request options defaults', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockClient.connect.mockReset().mockResolvedValue(undefined);
     cleanupAllServers();
     delete process.env.DEFAULT_REQUEST_TIMEOUT;
     mockFindById.mockResolvedValue(undefined);
@@ -126,6 +138,7 @@ describe('mcpService request options defaults', () => {
 
   afterEach(() => {
     cleanupAllServers();
+    jest.useRealTimers();
     if (originalDefaultRequestTimeout === undefined) {
       delete process.env.DEFAULT_REQUEST_TIMEOUT;
     } else {
@@ -237,6 +250,64 @@ describe('mcpService request options defaults', () => {
         resetTimeoutOnProgress: true,
       }),
     );
+  });
+
+  it('retries failed remote handshakes with bounded backoff even without keep-alive', async () => {
+    jest.useFakeTimers();
+    const config = {
+      name: 'flaky-http',
+      type: 'streamable-http',
+      url: 'https://example.com/mcp',
+      enabled: true,
+      enableKeepAlive: false,
+    };
+    mockFindAll.mockResolvedValue([config]);
+    mockFindById.mockResolvedValue(config);
+    mockClient.connect
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(new Error('still offline'));
+
+    await initUpstreamServers();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(getServerByName('flaky-http')?.status).toBe('disconnected');
+    expect(mockClient.connect).toHaveBeenCalledTimes(1);
+
+    await jest.advanceTimersByTimeAsync(999);
+    expect(mockClient.connect).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(100);
+    await flushAsync();
+    expect(mockClient.connect).toHaveBeenCalledTimes(2);
+    expect(getServerByName('flaky-http')?.status).toBe('disconnected');
+    await jest.advanceTimersByTimeAsync(1900);
+    expect(mockClient.connect).toHaveBeenCalledTimes(2);
+    await jest.advanceTimersByTimeAsync(100);
+    await flushAsync();
+    expect(mockClient.connect).toHaveBeenCalledTimes(3);
+    expect(getServerByName('flaky-http')?.status).toBe('connected');
+    expect(setupClientKeepAlive).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ enableKeepAlive: false }),
+      expect.anything(),
+    );
+  });
+
+  it('cancels a failed remote handshake retry when the server closes', async () => {
+    jest.useFakeTimers();
+    mockFindAll.mockResolvedValue([
+      {
+        name: 'flaky-http',
+        type: 'streamable-http',
+        url: 'https://example.com/mcp',
+        enabled: true,
+      },
+    ]);
+    mockClient.connect.mockRejectedValueOnce(new Error('offline'));
+    await initUpstreamServers();
+    await jest.advanceTimersByTimeAsync(0);
+    await flushAsync();
+    closeServer('flaky-http');
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(mockClient.connect).toHaveBeenCalledTimes(1);
   });
 
   it('sets up keep-alive reconnect checks after a remote startup connection failure', async () => {

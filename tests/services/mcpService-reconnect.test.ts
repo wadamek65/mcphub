@@ -164,8 +164,7 @@ describe('mcpService streamable-http reconnect', () => {
         callTool: initialCallTool,
         close: initialClientClose,
       },
-      transport:
-        transport ?? new StreamableHTTPClientTransport(new URL('https://example.com/mcp')),
+      transport: transport ?? new StreamableHTTPClientTransport(new URL('https://example.com/mcp')),
       options: {},
       initialClientClose,
     };
@@ -244,6 +243,49 @@ describe('mcpService streamable-http reconnect', () => {
     expect(result.isError).toBe(false);
     expect(serverInfo.initialClientClose).toHaveBeenCalledTimes(1);
     expect(mockReconnectClient.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconnects and retries when the SDK says the client is not connected', async () => {
+    const initialCallTool = jest.fn().mockRejectedValue(new Error('Not connected'));
+    const serverInfo = createServerInfo(initialCallTool) as any;
+    mcpService.setServerInfosForTest([serverInfo]);
+
+    const result = await mcpService.handleCallToolRequest(
+      {
+        params: {
+          name: 'call_tool',
+          arguments: { toolName: 'clock-server::get_current_time', arguments: {} },
+        },
+      },
+      { sessionId: 'session-1', server: 'clock-server' },
+    );
+
+    expect(result.isError).toBe(false);
+    expect(initialCallTool).toHaveBeenCalledTimes(1);
+    expect(mockReconnectClient.callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it('never replays a tool call after an ambiguous HTTP 502', async () => {
+    const initialCallTool = jest.fn().mockRejectedValue({
+      message: 'Streamable HTTP error: 502 Bad Gateway',
+      code: 502,
+    });
+    const serverInfo = createServerInfo(initialCallTool) as any;
+    mcpService.setServerInfosForTest([serverInfo]);
+
+    const result = await mcpService.handleCallToolRequest(
+      {
+        params: {
+          name: 'call_tool',
+          arguments: { toolName: 'clock-server::get_current_time', arguments: {} },
+        },
+      },
+      { sessionId: 'session-1', server: 'clock-server' },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(initialCallTool).toHaveBeenCalledTimes(1);
+    expect(mockReconnectClient.connect).not.toHaveBeenCalled();
   });
 
   it('does not reconnect for non-recoverable HTTP 400 errors', async () => {

@@ -723,6 +723,7 @@ const normalizeResourceForCache = (resource: McpResource): Resource => {
 
 // Store all server information
 let serverInfos: ServerInfo[] = [];
+let initGeneration = 0;
 
 const getVisibleServerInfos = (): ServerInfo[] => {
   return getDataService().filterData(serverInfos);
@@ -916,6 +917,7 @@ export const connected = (): boolean => {
 
 // Global cleanup function to close all connections
 export const cleanupAllServers = (): void => {
+  for (const name of remoteRetries.keys()) clearRemoteRetry(name);
   for (const serverInfo of serverInfos) {
     try {
       if (serverInfo.client) {
@@ -1436,10 +1438,16 @@ const callToolWithReconnect = async (
       return result;
     } catch (error: any) {
       const isHttp40xError = isRecoverableHttp4xxError(error);
+      // The SDK throws this before sending a request; unlike a timeout/502 it is safe to retry.
+      const isClosedClient = error?.message === 'Not connected';
       // Only retry for StreamableHTTPClientTransport and SSE transports
       const isStreamableHttp = transport instanceof StreamableHTTPClientTransport;
       const isSSE = transport instanceof SSEClientTransport;
-      if (attempt < maxRetries && transport && ((isStreamableHttp && isHttp40xError) || isSSE)) {
+      if (
+        attempt < maxRetries &&
+        transport &&
+        ((isStreamableHttp && (isHttp40xError || isClosedClient)) || isSSE)
+      ) {
         logger.warn(
           `${isHttp40xError ? 'HTTP 40x error' : 'error'} detected for ${isStreamableHttp ? 'StreamableHTTP' : 'SSE'} server ${serverInfo.name}${isolated ? ` (isolated session ${isolated.sessionId})` : ''}, attempting reconnection (attempt ${attempt + 1}/${maxRetries + 1})`,
         );
@@ -1559,12 +1567,50 @@ const setupServerKeepAlive = (serverInfo: ServerInfo, serverConfig: ServerConfig
   );
 };
 
+const remoteRetries = new Map<
+  string,
+  { failures: number; timer?: ReturnType<typeof setTimeout> }
+>();
+
+const clearRemoteRetry = (name: string): void => {
+  const retry = remoteRetries.get(name);
+  if (retry?.timer) clearTimeout(retry.timer);
+  remoteRetries.delete(name);
+};
+
+const scheduleRemoteRetry = (name: string): void => {
+  const retry = remoteRetries.get(name) ?? { failures: 0 };
+  if (retry.timer) return;
+  // ponytail: cap retries at 60s; add jitter if synchronized outages become a problem.
+  const delay = Math.min(60_000, 1_000 * 2 ** retry.failures);
+  retry.failures = Math.min(retry.failures + 1, 6);
+  retry.timer = setTimeout(() => {
+    retry.timer = undefined;
+    const current = getServerByName(name);
+    if (!current || current.enabled === false || current.status !== 'disconnected') {
+      clearRemoteRetry(name);
+      return;
+    }
+    reconnectServer(name).catch((error) => {
+      logger.warn('Background MCP reconnect failed', {
+        serverName: name,
+        error: summarizeErrorForLogging(error),
+      });
+      const active = getServerByName(name);
+      if (active?.enabled !== false && active?.status === 'disconnected') scheduleRemoteRetry(name);
+    });
+  }, delay);
+  retry.timer.unref?.();
+  remoteRetries.set(name, retry);
+};
+
 // Initialize MCP server clients
 export const initializeClientsFromSettings = async (
   isInit: boolean,
   serverName?: string,
   options?: { reportEmbeddingProgress?: boolean },
 ): Promise<ServerInfo[]> => {
+  const generation = ++initGeneration;
   const allServers: ServerConfigWithName[] = await getServerDao().findAll();
   const existingServerInfos = serverInfos;
   const nextServerInfos: ServerInfo[] = [];
@@ -1839,10 +1885,13 @@ export const initializeClientsFromSettings = async (
 
       connectClientWithDiagnostics(client, transport, initRequestOptions || requestOptions)
         .then(() => {
+          const active = generation === initGeneration ? serverInfo : getServerByName(name);
+          if (!active || active.client !== client) return;
+          clearRemoteRetry(name);
           logger.log(`Successfully connected client for server: ${name}`);
           const serverVersion = client.getServerVersion?.();
-          serverInfo.version = serverVersion?.version;
-          serverInfo.instructions = client.getInstructions?.();
+          active.version = serverVersion?.version;
+          active.instructions = client.getInstructions?.();
           const capabilities: ServerCapabilities | undefined = client.getServerCapabilities();
           logger.log('Server capabilities', JSON.stringify(capabilities));
 
@@ -1851,8 +1900,9 @@ export const initializeClientsFromSettings = async (
             client
               .listTools({}, initRequestOptions || requestOptions)
               .then((tools) => {
+                if ((generation === initGeneration ? serverInfo : getServerByName(name))?.client !== client) return;
                 logger.log(`Successfully listed ${tools.tools.length} tools for server: ${name}`);
-                updateServerToolsCache(serverInfo, tools.tools, {
+                updateServerToolsCache(active, tools.tools, {
                   reportEmbeddingProgress:
                     options?.reportEmbeddingProgress === true && serverName === name,
                 });
@@ -1875,10 +1925,11 @@ export const initializeClientsFromSettings = async (
             client
               .listPrompts({}, initRequestOptions || requestOptions)
               .then((prompts) => {
+                if ((generation === initGeneration ? serverInfo : getServerByName(name))?.client !== client) return;
                 logger.log(
                   `Successfully listed ${prompts.prompts.length} prompts for server: ${name}`,
                 );
-                updateServerPromptsCache(serverInfo, prompts.prompts);
+                updateServerPromptsCache(active, prompts.prompts);
                 broadcastPromptListChanged();
               })
               .catch((error) => {
@@ -1894,10 +1945,11 @@ export const initializeClientsFromSettings = async (
             client
               .listResources({}, initRequestOptions || requestOptions)
               .then((resources) => {
+                if ((generation === initGeneration ? serverInfo : getServerByName(name))?.client !== client) return;
                 logger.log(
                   `Successfully listed ${resources.resources.length} resources for server: ${name}`,
                 );
-                updateServerResourcesCache(serverInfo, resources.resources);
+                updateServerResourcesCache(active, resources.resources);
                 broadcastResourceListChanged();
               })
               .catch((error) => {
@@ -1910,42 +1962,51 @@ export const initializeClientsFromSettings = async (
           }
 
           if (!dataError) {
-            serverInfo.status = 'connected';
-            serverInfo.error = null;
+            active.status = 'connected';
+            active.error = null;
             // Set up keep-alive ping for SSE connections via shared service
-            setupServerKeepAlive(serverInfo, expandedConf);
+            setupServerKeepAlive(active, expandedConf);
           } else {
-            serverInfo.status = 'disconnected';
-            serverInfo.error = `Failed to list data: ${formatErrorForLogging(dataError)}`;
-            setupServerKeepAlive(serverInfo, expandedConf);
+            active.status = 'disconnected';
+            active.error = `Failed to list data: ${formatErrorForLogging(dataError)}`;
+            setupServerKeepAlive(active, expandedConf);
           }
         })
         .catch(async (error) => {
+          const active = generation === initGeneration ? serverInfo : getServerByName(name);
+          if (!active || active.client !== client) return;
           // Check if this is an OAuth authorization error
           const isOAuthError =
             error?.message?.includes('OAuth authorization required') ||
             error?.message?.includes('Authorization required');
 
           if (isOAuthError) {
+            clearRemoteRetry(name);
             // OAuth provider should have already set the status to 'oauth_required'
-            // and stored the authorization URL in serverInfo.oauth
+            // and stored the authorization URL in active.oauth
             logger.log(
               `OAuth authorization required for server ${name}. Status should be set to 'oauth_required'.`,
             );
             // Make sure status is set correctly
-            if (serverInfo.status !== 'oauth_required') {
-              serverInfo.status = 'oauth_required';
+            if (active.status !== 'oauth_required') {
+              active.status = 'oauth_required';
             }
-            serverInfo.error = null;
+            active.error = null;
           } else {
             logger.error('Failed to connect client for server', {
               serverName: name,
               error: summarizeErrorForLogging(error),
             });
             // Other connection errors
-            serverInfo.status = 'disconnected';
-            serverInfo.error = `Failed to connect: ${formatErrorForLogging(error)}`;
-            setupServerKeepAlive(serverInfo, expandedConf);
+            active.status = 'disconnected';
+            active.error = `Failed to connect: ${formatErrorForLogging(error)}`;
+            if (
+              expandedConf.enableKeepAlive !== true &&
+              transport instanceof StreamableHTTPClientTransport
+            ) {
+              scheduleRemoteRetry(name);
+            }
+            setupServerKeepAlive(active, expandedConf);
           }
         });
       logger.log(`Initialized client for server: ${name}`);
@@ -2186,6 +2247,11 @@ export const reconnectServer = async (serverName: string): Promise<void> => {
     }
   }
 
+  const retry = remoteRetries.get(serverName);
+  if (retry?.timer) {
+    clearTimeout(retry.timer);
+    retry.timer = undefined;
+  }
   if (serverInfo.keepAliveIntervalId) {
     clearInterval(serverInfo.keepAliveIntervalId);
     serverInfo.keepAliveIntervalId = undefined;
@@ -2402,6 +2468,7 @@ function checkAuthError(result: any) {
 }
 
 const closeServerRuntime = (serverInfo: ServerInfo): void => {
+  clearRemoteRetry(serverInfo.name);
   if (serverInfo.keepAliveIntervalId) {
     clearInterval(serverInfo.keepAliveIntervalId);
     serverInfo.keepAliveIntervalId = undefined;

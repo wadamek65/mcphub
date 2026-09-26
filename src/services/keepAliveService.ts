@@ -119,6 +119,17 @@ export const setupClientKeepAlive = async (
       }
 
       const message = formatErrorForLogging(error);
+      // A slow or briefly unavailable HTTP endpoint does not prove the MCP session is lost.
+      if (
+        isStreamableHttp &&
+        serverInfo.status === 'connected' &&
+        (/timed out|timeout/i.test(message) ||
+          (typeof (error as { code?: unknown }).code === 'number' &&
+            (error as { code: number }).code >= 500))
+      ) {
+        logger.warn('Keep-alive ping inconclusive', { serverName: serverInfo.name, error });
+        return;
+      }
       const nextError = `Keep-alive failed: ${message}`;
       if (serverInfo.status !== 'disconnected' || serverInfo.error !== nextError) {
         logger.warn('Keep-alive ping failed', { serverName: serverInfo.name, error });
